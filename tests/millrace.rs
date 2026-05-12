@@ -296,6 +296,128 @@ fn controller_dispatches_probe_idea_and_task_to_matching_queue_commands() {
 }
 
 #[test]
+fn controller_finds_existing_scoped_intake_newest_first_by_item_id() {
+    let workspace = test_workspace("existing-newest");
+    let intake_dir = workspace.join(".millracer").join("intake");
+    std::fs::create_dir_all(&intake_dir).expect("intake dir");
+    let old_path = intake_dir.join("probe-old.md");
+    std::fs::write(&old_path, "Scoped-Work:\n- Item-ID: ITEM-123\n").expect("old intake");
+    let new_path = intake_dir.join("probe-new.md");
+    write_newer_than(&new_path, "Scoped-Work:\n- Item-ID: ITEM-123\n", &old_path);
+    let controller = controller(FakeExecutor::new(), &workspace);
+    let scoped = ScopedWorkItem {
+        item_id: "ITEM-123".to_owned(),
+        title: None,
+        source_queue: None,
+        spec_path: None,
+        completion_ref: None,
+        constraints: Vec::new(),
+    };
+
+    let found = controller
+        .find_existing_scoped_intake(&scoped)
+        .expect("lookup");
+
+    assert_eq!(found, Some(new_path));
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn controller_finds_existing_scoped_intake_by_completion_ref() {
+    let workspace = test_workspace("existing-completion-ref");
+    let intake_dir = workspace.join(".millracer").join("intake");
+    std::fs::create_dir_all(&intake_dir).expect("intake dir");
+    let intake_path = intake_dir.join("task-scoped.md");
+    std::fs::write(
+        &intake_path,
+        "Scoped-Work:\n- Item-ID: OTHER\n- Completion-Ref: agent-impl-M06\n",
+    )
+    .expect("intake");
+    let controller = controller(FakeExecutor::new(), &workspace);
+    let scoped = ScopedWorkItem {
+        item_id: "M06".to_owned(),
+        title: None,
+        source_queue: None,
+        spec_path: None,
+        completion_ref: Some("agent-impl-M06".to_owned()),
+        constraints: Vec::new(),
+    };
+
+    let found = controller
+        .find_existing_scoped_intake(&scoped)
+        .expect("lookup");
+
+    assert_eq!(found, Some(intake_path));
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn controller_ignores_unreadable_and_non_matching_scoped_intake_documents() {
+    let workspace = test_workspace("existing-ignored");
+    let intake_dir = workspace.join(".millracer").join("intake");
+    std::fs::create_dir_all(&intake_dir).expect("intake dir");
+    let matching_path = intake_dir.join("probe-matching.md");
+    std::fs::write(&matching_path, "Scoped-Work:\n- Item-ID: ITEM-123\n").expect("matching");
+    std::thread::sleep(Duration::from_millis(25));
+    std::fs::write(
+        intake_dir.join("probe-other.md"),
+        "Scoped-Work:\n- Item-ID: OTHER\n",
+    )
+    .expect("non-matching");
+    std::thread::sleep(Duration::from_millis(25));
+    std::fs::create_dir(intake_dir.join("probe-unreadable.md")).expect("unreadable");
+    let controller = controller(FakeExecutor::new(), &workspace);
+    let scoped = ScopedWorkItem {
+        item_id: "ITEM-123".to_owned(),
+        title: None,
+        source_queue: None,
+        spec_path: None,
+        completion_ref: None,
+        constraints: Vec::new(),
+    };
+
+    let found = controller
+        .find_existing_scoped_intake(&scoped)
+        .expect("lookup");
+
+    assert_eq!(found, Some(matching_path));
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn controller_returns_no_existing_scoped_intake_without_match() {
+    let workspace = test_workspace("existing-none");
+    let intake_dir = workspace.join(".millracer").join("intake");
+    std::fs::create_dir_all(&intake_dir).expect("intake dir");
+    std::fs::write(
+        intake_dir.join("probe-other.md"),
+        "Scoped-Work:\n- Item-ID: OTHER\n- Completion-Ref: other-ref\n",
+    )
+    .expect("non-matching");
+    std::fs::write(
+        intake_dir.join("probe-match.txt"),
+        "Scoped-Work:\n- Item-ID: ITEM-123\n",
+    )
+    .expect("ignored extension");
+    let controller = controller(FakeExecutor::new(), &workspace);
+    let scoped = ScopedWorkItem {
+        item_id: "ITEM-123".to_owned(),
+        title: None,
+        source_queue: None,
+        spec_path: None,
+        completion_ref: Some("agent-impl-M06".to_owned()),
+        constraints: Vec::new(),
+    };
+
+    let found = controller
+        .find_existing_scoped_intake(&scoped)
+        .expect("lookup");
+
+    assert_eq!(found, None);
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[test]
 fn controller_uses_default_pi_mode_for_init_validate_and_daemon() {
     let executor = FakeExecutor::new();
     let mut controller = controller(executor.clone(), Path::new("/tmp/ws"));
@@ -525,6 +647,25 @@ fn test_workspace(name: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&workspace);
     std::fs::create_dir_all(&workspace).expect("workspace dir");
     workspace
+}
+
+fn write_newer_than(path: &Path, contents: &str, older_path: &Path) {
+    let older_modified = std::fs::metadata(older_path)
+        .expect("older metadata")
+        .modified()
+        .expect("older modified");
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(25));
+        std::fs::write(path, contents).expect("newer file");
+        let modified = std::fs::metadata(path)
+            .expect("newer metadata")
+            .modified()
+            .expect("newer modified");
+        if modified > older_modified {
+            return;
+        }
+    }
+    panic!("could not create a newer mtime for {}", path.display());
 }
 
 fn strings<const N: usize>(items: [&str; N]) -> Vec<String> {

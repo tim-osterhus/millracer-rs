@@ -204,7 +204,7 @@ pub fn classify_status(
 
     if is_globally_drained(payload) {
         return Some(MonitorEvent::new(
-            "complete",
+            "idle_no_work",
             workspace,
             "daemon idle with no work",
         ));

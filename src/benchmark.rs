@@ -29,6 +29,9 @@ pub struct RunResult {
     pub task_path: Option<String>,
     pub status: Option<Value>,
     pub warnings: Vec<String>,
+    pub outcome: String,
+    pub scoped_completion: bool,
+    pub completion_evidence: Vec<BTreeMap<String, String>>,
     pub scoped_work_item: Option<ScopedWorkItem>,
     pub progress_events: Vec<MonitorEvent>,
     pub task: String,
@@ -89,6 +92,10 @@ fn run_result_json(result: &RunResult) -> Value {
     payload.insert("decision".to_owned(), decision_json(result));
     payload.insert("event".to_owned(), event_json(result.event.as_ref()));
     payload.insert(
+        "completion_evidence".to_owned(),
+        completion_evidence_json(&result.completion_evidence),
+    );
+    payload.insert(
         "intake_kind".to_owned(),
         Value::String(result.intake_kind.clone()),
     );
@@ -105,6 +112,7 @@ fn run_result_json(result: &RunResult) -> Value {
         Value::Bool(result.notify_terminal_stages),
     );
     payload.insert("output".to_owned(), Value::String(result.output.clone()));
+    payload.insert("outcome".to_owned(), Value::String(result.outcome.clone()));
     payload.insert(
         "pi_session".to_owned(),
         Value::String(result.pi_session.clone()),
@@ -120,6 +128,10 @@ fn run_result_json(result: &RunResult) -> Value {
         ),
     );
     payload.insert("route".to_owned(), Value::String(result.route.clone()));
+    payload.insert(
+        "scoped_completion".to_owned(),
+        Value::Bool(result.scoped_completion),
+    );
     payload.insert(
         "scoped_work_item".to_owned(),
         result
@@ -147,6 +159,21 @@ fn run_result_json(result: &RunResult) -> Value {
         Value::String(result.workspace.clone()),
     );
     Value::Object(payload)
+}
+
+fn completion_evidence_json(evidence: &[BTreeMap<String, String>]) -> Value {
+    Value::Array(
+        evidence
+            .iter()
+            .map(|item| {
+                Value::Object(
+                    item.iter()
+                        .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+                        .collect(),
+                )
+            })
+            .collect(),
+    )
 }
 
 fn decision_json(result: &RunResult) -> Value {

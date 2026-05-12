@@ -107,6 +107,9 @@ pub struct FinalizationPrompt<'a> {
     pub workspace: &'a str,
     pub route: &'a str,
     pub intake_kind: &'a str,
+    pub outcome: &'a str,
+    pub scoped_completion: bool,
+    pub completion_evidence_json: &'a str,
     pub event_kind: &'a str,
     pub event_reason: &'a str,
     pub status_json: &'a str,
@@ -134,6 +137,8 @@ Millrace emitted this terminal event for delegated work:
 - workspace: {workspace}
 - route: {route}
 - intake kind: {intake_kind}
+- outcome: {outcome}
+- scoped completion: {scoped_completion}
 - event: {event_kind}
 - reason: {event_reason}
 
@@ -146,6 +151,9 @@ Scoped work metadata:
 Progress events observed before terminal event:
 {progress_text}
 
+Completion evidence:
+{completion_evidence_json}
+
 Latest Millrace status JSON:
 {status_json}
 
@@ -157,10 +165,15 @@ final answer. Be explicit about whether the delegated run completed, blocked,
 needs daemon restart, or needs follow-up. If external completion signals are
 involved, only describe signals that correspond to the active scoped work item.
 Do not invent completion signals or recommend completion for unrelated work.
+Treat daemon idle without scoped completion evidence as incomplete, not
+successful completion.
 ",
         workspace = args.workspace,
         route = args.route,
         intake_kind = args.intake_kind,
+        outcome = args.outcome,
+        scoped_completion = args.scoped_completion,
+        completion_evidence_json = args.completion_evidence_json,
         event_kind = args.event_kind,
         event_reason = args.event_reason,
         task = args.task,

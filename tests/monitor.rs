@@ -148,7 +148,7 @@ fn classify_status_detects_running_daemon_with_drained_work() {
     assert_eq!(
         event,
         Some(MonitorEvent::new(
-            "complete",
+            "idle_no_work",
             "/tmp/ws",
             "daemon idle with no work"
         ))
@@ -236,7 +236,10 @@ fn monitor_suppresses_duplicate_progress_events_until_terminal_event() {
     );
 
     assert_eq!(monitor.wait(1.0).expect("progress").kind, "stage_progress");
-    assert_eq!(monitor.wait(1.0).expect("complete").kind, "complete");
+    assert_eq!(
+        monitor.wait(1.0).expect("idle_no_work").kind,
+        "idle_no_work"
+    );
 }
 
 #[test]
@@ -265,10 +268,13 @@ fn monitor_events_are_jsonable_and_fit_run_result_boundary() {
         intake_signals: Vec::new(),
         decision: Decision::new("millrace", "test"),
         output: "done".to_owned(),
-        event: Some(MonitorEvent::new("complete", "/tmp/ws", "daemon idle")),
+        event: Some(MonitorEvent::new("idle_no_work", "/tmp/ws", "daemon idle")),
         task_path: Some("/tmp/ws/.millracer/intake/task.md".to_owned()),
         status: Some(json!({"workspace": "/tmp/ws"})),
         warnings: Vec::new(),
+        outcome: "incomplete".to_owned(),
+        scoped_completion: false,
+        completion_evidence: Vec::new(),
         scoped_work_item: None,
         progress_events: vec![event],
         task: "do work".to_owned(),
@@ -281,7 +287,13 @@ fn monitor_events_are_jsonable_and_fit_run_result_boundary() {
     .expect("run result json");
     let payload: Value = serde_json::from_str(&raw).expect("json payload");
 
-    assert_eq!(payload["event"]["kind"], "complete");
+    assert_eq!(payload["event"]["kind"], "idle_no_work");
+    assert_eq!(payload["outcome"], "incomplete");
+    assert_eq!(payload["scoped_completion"], false);
+    assert_eq!(
+        payload["completion_evidence"].as_array().map(Vec::len),
+        Some(0)
+    );
     assert_eq!(payload["progress_events"][0]["kind"], "stage_progress");
     assert_eq!(
         payload["progress_events"][0]["reason"],

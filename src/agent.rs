@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -108,6 +109,13 @@ pub trait MillraceLike {
         task: &str,
         scoped_work_item: Option<&ScopedWorkItem>,
     ) -> MillracerResult<PathBuf>;
+    fn find_existing_scoped_intake(
+        &mut self,
+        scoped_work_item: &ScopedWorkItem,
+    ) -> MillracerResult<Option<PathBuf>> {
+        let _ = scoped_work_item;
+        Ok(None)
+    }
     fn start_daemon(&mut self) -> MillracerResult<()>;
     fn restart_daemon(&mut self) -> MillracerResult<()>;
     fn stop_daemon(&mut self) -> MillracerResult<()>;
@@ -138,6 +146,13 @@ where
         scoped_work_item: Option<&ScopedWorkItem>,
     ) -> MillracerResult<PathBuf> {
         MillraceController::enqueue(self, intake_kind, task, scoped_work_item)
+    }
+
+    fn find_existing_scoped_intake(
+        &mut self,
+        scoped_work_item: &ScopedWorkItem,
+    ) -> MillracerResult<Option<PathBuf>> {
+        MillraceController::find_existing_scoped_intake(self, scoped_work_item)
     }
 
     fn start_daemon(&mut self) -> MillracerResult<()> {
@@ -279,7 +294,7 @@ where
                 &options.cwd,
                 timeout_from_seconds(options.pi_timeout_seconds),
             )?;
-            return Ok(base_result(
+            let mut result = base_result(
                 BaseResultInput {
                     route: "direct",
                     decision,
@@ -290,15 +305,47 @@ where
                 },
                 task,
                 &options,
-            ));
+            );
+            result.outcome = "completed".to_owned();
+            return Ok(result);
         }
 
         self.millrace.set_mode(&decision.mode)?;
         self.millrace.initialize()?;
         self.millrace.validate()?;
-        let task_path =
+        let existing_scoped_intake =
+            if let Some(scoped_work_item) = options.scoped_work_item.as_ref() {
+                self.millrace
+                    .find_existing_scoped_intake(scoped_work_item)?
+            } else {
+                None
+            };
+        if let Some(task_path) = existing_scoped_intake.as_ref() {
+            let status = self.millrace.status()?;
+            if let Some(result) = existing_blocked_scoped_result(
+                ExistingBlockedInput {
+                    decision: decision.clone(),
+                    intake_kind: intake_kind_text.clone(),
+                    intake_signals: intake_decision.signals.clone(),
+                    warnings: warnings.clone(),
+                    task_path,
+                    status,
+                },
+                task,
+                &options,
+                &mut self.pi,
+            )? {
+                return Ok(result);
+            }
+        }
+        let task_path = if let Some(task_path) = existing_scoped_intake {
+            task_path
+        } else if let Some(scoped_work_item) = options.scoped_work_item.as_ref() {
             self.millrace
-                .enqueue(intake_kind, task, options.scoped_work_item.as_ref())?;
+                .enqueue(intake_kind, task, Some(scoped_work_item))?
+        } else {
+            self.millrace.enqueue(intake_kind, task, None)?
+        };
         self.millrace.start_daemon()?;
         let (event, progress_events) =
             self.wait_for_terminal_event(task, &intake_kind_text, &options)?;
@@ -310,12 +357,17 @@ where
         let status_json = serde_json::to_string_pretty(&status_value)?;
         let progress_json = serde_json::to_string_pretty(&progress_events)?;
         let scoped_json = scoped_work_json(options.scoped_work_item.as_ref());
+        let (outcome, scoped_completion, completion_evidence) = outcome_for_event(&event);
+        let completion_evidence_json = serde_json::to_string_pretty(&completion_evidence)?;
         let output = self.pi.complete(
             &finalization_prompt(FinalizationPrompt {
                 task,
                 workspace: &options.workspace.display().to_string(),
                 route: "millrace",
                 intake_kind: &intake_kind_text,
+                outcome: &outcome,
+                scoped_completion,
+                completion_evidence_json: &completion_evidence_json,
                 event_kind: &event.kind,
                 event_reason: &event.reason,
                 status_json: &status_json,
@@ -343,6 +395,9 @@ where
         result.task_path = Some(task_path.display().to_string());
         result.status = Some(status_value);
         result.progress_events = progress_events;
+        result.outcome = outcome;
+        result.scoped_completion = scoped_completion;
+        result.completion_evidence = completion_evidence;
         Ok(result)
     }
 
@@ -398,6 +453,9 @@ fn base_result(input: BaseResultInput, task: &str, options: &RunOptions) -> RunR
         task_path: None,
         status: None,
         warnings: input.warnings,
+        outcome: "incomplete".to_owned(),
+        scoped_completion: false,
+        completion_evidence: Vec::new(),
         scoped_work_item: options.scoped_work_item.clone(),
         progress_events: Vec::new(),
         task: task.to_owned(),
@@ -416,6 +474,133 @@ struct BaseResultInput {
     intake_kind: String,
     intake_signals: Vec<String>,
     warnings: Vec<String>,
+}
+
+struct ExistingBlockedInput<'a> {
+    decision: Decision,
+    intake_kind: String,
+    intake_signals: Vec<String>,
+    warnings: Vec<String>,
+    task_path: &'a Path,
+    status: Map<String, Value>,
+}
+
+fn existing_blocked_scoped_result<P>(
+    input: ExistingBlockedInput<'_>,
+    task: &str,
+    options: &RunOptions,
+    pi: &mut P,
+) -> MillracerResult<Option<RunResult>>
+where
+    P: PiLike,
+{
+    let failure_class = input.status.get("current_failure_class");
+    let latest_error = input.status.get("latest_runtime_error_report_path");
+    if !json_truthy(failure_class) && !json_truthy(latest_error) {
+        return Ok(None);
+    }
+
+    let reason = failure_class
+        .filter(|value| json_truthy(Some(value)))
+        .map(json_text)
+        .unwrap_or_else(|| "latest runtime error".to_owned());
+    let workspace = truthy_text_or(
+        input.status.get("workspace"),
+        &options.workspace.display().to_string(),
+    );
+    let event = MonitorEvent::new("blocked", workspace, reason);
+    let status_value = Value::Object(input.status.clone());
+    let status_json = serde_json::to_string_pretty(&status_value)?;
+    let scoped_json = scoped_work_json(options.scoped_work_item.as_ref());
+    let completion_evidence_json = "[]";
+    let progress_events_json = "[]";
+    let output = pi.complete(
+        &finalization_prompt(FinalizationPrompt {
+            task,
+            workspace: &options.workspace.display().to_string(),
+            route: "millrace",
+            intake_kind: &input.intake_kind,
+            outcome: "blocked",
+            scoped_completion: false,
+            completion_evidence_json,
+            event_kind: &event.kind,
+            event_reason: &event.reason,
+            status_json: &status_json,
+            warnings: &input.warnings,
+            scoped_work_json: scoped_json.as_deref(),
+            progress_events_json: Some(progress_events_json),
+        }),
+        &options.cwd,
+        timeout_from_seconds(options.pi_timeout_seconds),
+    )?;
+
+    let mut result = base_result(
+        BaseResultInput {
+            route: "millrace",
+            decision: input.decision,
+            output,
+            intake_kind: input.intake_kind,
+            intake_signals: input.intake_signals,
+            warnings: input.warnings,
+        },
+        task,
+        options,
+    );
+    result.event = Some(event);
+    result.task_path = Some(input.task_path.display().to_string());
+    result.status = Some(status_value);
+    result.outcome = "blocked".to_owned();
+    Ok(Some(result))
+}
+
+fn outcome_for_event(event: &MonitorEvent) -> (String, bool, Vec<BTreeMap<String, String>>) {
+    if event.kind == "arbiter_complete" || event.kind == "scoped_complete" {
+        return (
+            "completed".to_owned(),
+            true,
+            vec![BTreeMap::from([
+                ("kind".to_owned(), event.kind.clone()),
+                ("reason".to_owned(), event.reason.clone()),
+                ("workspace".to_owned(), event.workspace.clone()),
+            ])],
+        );
+    }
+
+    let outcome = match event.kind.as_str() {
+        "blocked" => "blocked",
+        "restart_needed" => "restart_needed",
+        "crashed" => "crashed",
+        _ => "incomplete",
+    };
+    (outcome.to_owned(), false, Vec::new())
+}
+
+fn json_truthy(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::Number(value)) => value.as_f64().is_some_and(|number| number != 0.0),
+        Some(Value::String(value)) => !value.is_empty(),
+        Some(Value::Array(value)) => !value.is_empty(),
+        Some(Value::Object(value)) => !value.is_empty(),
+        Some(Value::Null) | None => false,
+    }
+}
+
+fn json_text(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Null => "None".to_owned(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::Array(_) | Value::Object(_) => value.to_string(),
+    }
+}
+
+fn truthy_text_or(value: Option<&Value>, fallback: &str) -> String {
+    value
+        .filter(|item| json_truthy(Some(item)))
+        .map(json_text)
+        .unwrap_or_else(|| fallback.to_owned())
 }
 
 fn timeout_from_seconds(seconds: Option<i32>) -> Option<Duration> {

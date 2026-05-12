@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use millracer::benchmark::{
@@ -126,13 +127,20 @@ fn render_benchmark_result_includes_scoped_work_item() {
         decision: Decision::new("millrace", "test"),
         output: "done".to_owned(),
         event: Some(MonitorEvent {
-            kind: "complete".to_owned(),
+            kind: "idle_no_work".to_owned(),
             workspace: "/tmp/ws".to_owned(),
             reason: "daemon idle".to_owned(),
         }),
         task_path: Some("/tmp/ws/.millracer/intake/probe.md".to_owned()),
         status: Some(serde_json::json!({"workspace": "/tmp/ws"})),
         warnings: Vec::new(),
+        outcome: "completed".to_owned(),
+        scoped_completion: true,
+        completion_evidence: vec![BTreeMap::from([
+            ("kind".to_owned(), "arbiter_complete".to_owned()),
+            ("reason".to_owned(), "closed".to_owned()),
+            ("workspace".to_owned(), "/tmp/ws".to_owned()),
+        ])],
         scoped_work_item: Some(ScopedWorkItem {
             item_id: "ITEM-123".to_owned(),
             title: None,
@@ -156,6 +164,14 @@ fn render_benchmark_result_includes_scoped_work_item() {
     assert_eq!(payload["intake_kind"], "probe");
     assert_eq!(payload["intake_signals"][0], "large pre-existing codebase");
     assert_eq!(payload["decision"]["mode"], "default_pi");
-    assert_eq!(payload["event"]["kind"], "complete");
+    assert_eq!(payload["event"]["kind"], "idle_no_work");
     assert_eq!(payload["task_path"], "/tmp/ws/.millracer/intake/probe.md");
+    assert_eq!(payload["outcome"], "completed");
+    assert_eq!(payload["scoped_completion"], true);
+    assert_eq!(
+        payload["completion_evidence"][0]["kind"],
+        "arbiter_complete"
+    );
+    assert_eq!(payload["completion_evidence"][0]["reason"], "closed");
+    assert_eq!(payload["completion_evidence"][0]["workspace"], "/tmp/ws");
 }

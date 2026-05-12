@@ -39,6 +39,9 @@ fn finalization_prompt_reports_intake_kind_and_scope() {
         workspace: "/tmp/ws",
         route: "millrace",
         intake_kind: "probe",
+        outcome: "completed",
+        scoped_completion: true,
+        completion_evidence_json: r#"[{"kind": "arbiter_complete"}]"#,
         event_kind: "complete",
         event_reason: "done",
         status_json: "{}",
@@ -49,7 +52,11 @@ fn finalization_prompt_reports_intake_kind_and_scope() {
 
     assert!(prompt.contains("- route: millrace"));
     assert!(prompt.contains("- intake kind: probe"));
+    assert!(prompt.contains("- outcome: completed"));
+    assert!(prompt.contains("- scoped completion: true"));
+    assert!(prompt.contains(r#"[{"kind": "arbiter_complete"}]"#));
     assert!(prompt.contains(r#"{"item_id": "ITEM-123"}"#));
+    assert!(prompt.contains("Treat daemon idle without scoped completion evidence as incomplete"));
 }
 
 #[test]
@@ -62,6 +69,9 @@ fn injected_prompts_avoid_forbidden_benchmark_specific_terms() {
             workspace: "/tmp/ws",
             route: "millrace",
             intake_kind: "probe",
+            outcome: "completed",
+            scoped_completion: true,
+            completion_evidence_json: r#"[{"kind": "arbiter_complete"}]"#,
             event_kind: "complete",
             event_reason: "done",
             status_json: "{}",

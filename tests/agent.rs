@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -37,6 +37,8 @@ impl PiLike for FakePi {
 #[derive(Debug, Default)]
 struct FakeMillrace {
     calls: Vec<String>,
+    existing_scoped_intake: Option<PathBuf>,
+    status_payload: Map<String, Value>,
 }
 
 impl MillraceLike for FakeMillrace {
@@ -62,6 +64,15 @@ impl MillraceLike for FakeMillrace {
         )))
     }
 
+    fn find_existing_scoped_intake(
+        &mut self,
+        scoped_work_item: &ScopedWorkItem,
+    ) -> millracer::MillracerResult<Option<PathBuf>> {
+        self.calls
+            .push(format!("find_existing:{}", scoped_work_item.item_id));
+        Ok(self.existing_scoped_intake.clone())
+    }
+
     fn start_daemon(&mut self) -> millracer::MillracerResult<()> {
         self.calls.push("start_daemon".to_owned());
         Ok(())
@@ -79,6 +90,9 @@ impl MillraceLike for FakeMillrace {
 
     fn status(&mut self) -> millracer::MillracerResult<Map<String, Value>> {
         self.calls.push("status".to_owned());
+        if !self.status_payload.is_empty() {
+            return Ok(self.status_payload.clone());
+        }
         let Value::Object(payload) = json!({"workspace": "/tmp/ws"}) else {
             unreachable!();
         };
@@ -126,17 +140,95 @@ fn agent_routes_auto_decision_into_millrace_flow() {
 
     assert_eq!(result.route, "millrace");
     assert_eq!(result.intake_kind, "probe");
+    assert_eq!(result.outcome, "completed");
+    assert!(result.scoped_completion);
+    assert_eq!(
+        result.completion_evidence,
+        vec![BTreeMap::from([
+            ("kind".to_owned(), "arbiter_complete".to_owned()),
+            ("reason".to_owned(), "test".to_owned()),
+            ("workspace".to_owned(), "/tmp/ws".to_owned()),
+        ])]
+    );
     assert_eq!(
         result.decision,
         Decision::new("millrace", "needs durable execution")
     );
     assert_eq!(result.output, "final answer");
+    let finalization_prompt = agent
+        .pi
+        .prompts
+        .iter()
+        .find(|prompt| prompt.contains("Millrace emitted this terminal event"))
+        .expect("finalization prompt");
+    assert!(finalization_prompt.contains("- outcome: completed"));
+    assert!(finalization_prompt.contains("- scoped completion: true"));
+    assert!(finalization_prompt.contains("Completion evidence:"));
+    assert!(finalization_prompt.contains(r#""kind": "arbiter_complete""#));
+    assert!(finalization_prompt.contains(r#""workspace": "/tmp/ws""#));
+    assert!(
+        finalization_prompt
+            .contains("Treat daemon idle without scoped completion evidence as incomplete")
+    );
     assert_eq!(
         agent.millrace.calls,
         [
             "initialize",
             "validate",
             "enqueue:probe:Implement a multi-stage refactor",
+            "start_daemon",
+            "stop_daemon",
+            "status",
+        ]
+    );
+}
+
+#[test]
+fn agent_reuses_existing_scoped_intake_without_duplicate_enqueue() {
+    let intake_path = PathBuf::from("/tmp/ws/.millracer/intake/probe-old.md");
+    let mut options = RunOptions::new(PathBuf::from("/tmp/ws"), PathBuf::from("/tmp/ws"));
+    options.route = "millrace".to_owned();
+    options.scoped_work_item = Some(ScopedWorkItem {
+        item_id: "ITEM-123".to_owned(),
+        title: None,
+        source_queue: None,
+        spec_path: None,
+        completion_ref: Some("agent-impl-ITEM-123".to_owned()),
+        constraints: Vec::new(),
+    });
+    let mut agent = MillracerAgent::new(
+        FakePi::default(),
+        FakeMillrace {
+            existing_scoped_intake: Some(intake_path.clone()),
+            ..FakeMillrace::default()
+        },
+        FakeMonitor::new(vec![MonitorEvent::new(
+            "arbiter_complete",
+            "/tmp/ws",
+            "closure target closed",
+        )]),
+    );
+
+    let result = agent
+        .run("Process the selected scoped item", options)
+        .expect("agent run");
+
+    assert_eq!(result.task_path, Some(intake_path.display().to_string()));
+    assert_eq!(result.outcome, "completed");
+    assert!(result.scoped_completion);
+    assert_eq!(
+        result.completion_evidence[0]
+            .get("reason")
+            .map(String::as_str),
+        Some("closure target closed")
+    );
+    assert_eq!(
+        agent.millrace.calls,
+        [
+            "initialize",
+            "validate",
+            "find_existing:ITEM-123",
+            "status",
             "start_daemon",
             "stop_daemon",
             "status",
@@ -160,6 +252,9 @@ fn agent_forced_direct_route_uses_pi_without_millrace_calls() {
 
     assert_eq!(result.route, "direct");
     assert_eq!(result.output, "direct answer");
+    assert_eq!(result.outcome, "completed");
+    assert!(!result.scoped_completion);
+    assert!(result.completion_evidence.is_empty());
     assert!(agent.millrace.calls.is_empty());
 }
 
@@ -193,7 +288,7 @@ fn agent_warns_when_decision_requests_custom_loop() {
         },
         FakeMillrace::default(),
         FakeMonitor::new(vec![MonitorEvent::new(
-            "complete",
+            "idle_no_work",
             "/tmp/ws",
             "daemon idle",
         )]),
@@ -219,7 +314,7 @@ fn agent_uses_forced_intake_override() {
         FakePi::default(),
         FakeMillrace::default(),
         FakeMonitor::new(vec![MonitorEvent::new(
-            "complete",
+            "idle_no_work",
             "/tmp/ws",
             "daemon idle",
         )]),
@@ -251,7 +346,7 @@ fn agent_restarts_daemon_until_monitor_returns_terminal_event() {
                 "/tmp/ws",
                 "daemon stopped with queued work",
             ),
-            MonitorEvent::new("complete", "/tmp/ws", "daemon idle with no work"),
+            MonitorEvent::new("idle_no_work", "/tmp/ws", "daemon idle with no work"),
         ]),
     );
 
@@ -262,11 +357,14 @@ fn agent_restarts_daemon_until_monitor_returns_terminal_event() {
     assert_eq!(
         result.event,
         Some(MonitorEvent::new(
-            "complete",
+            "idle_no_work",
             "/tmp/ws",
             "daemon idle with no work"
         ))
     );
+    assert_eq!(result.outcome, "incomplete");
+    assert!(!result.scoped_completion);
+    assert!(result.completion_evidence.is_empty());
     assert!(agent.millrace.calls.contains(&"restart_daemon".to_owned()));
 }
 
@@ -297,8 +395,107 @@ fn agent_returns_restart_event_when_restart_limit_is_exhausted() {
             "daemon stopped with queued work"
         ))
     );
+    assert_eq!(result.outcome, "restart_needed");
+    assert!(!result.scoped_completion);
+    assert!(result.completion_evidence.is_empty());
     assert!(!agent.millrace.calls.contains(&"restart_daemon".to_owned()));
     assert!(agent.millrace.calls.contains(&"stop_daemon".to_owned()));
+}
+
+#[test]
+fn agent_maps_blocked_and_crashed_events_without_scoped_completion() {
+    for (kind, outcome, reason) in [
+        ("blocked", "blocked", "blocked idle"),
+        ("crashed", "crashed", "daemon stopped with active runs"),
+    ] {
+        let mut options = RunOptions::new(PathBuf::from("/tmp/ws"), PathBuf::from("/tmp/ws"));
+        options.route = "millrace".to_owned();
+        let mut agent = MillracerAgent::new(
+            FakePi::default(),
+            FakeMillrace::default(),
+            FakeMonitor::new(vec![MonitorEvent::new(kind, "/tmp/ws", reason)]),
+        );
+
+        let result = agent
+            .run("Process one scoped queue item", options)
+            .expect("agent run");
+
+        assert_eq!(
+            result.event,
+            Some(MonitorEvent::new(kind, "/tmp/ws", reason))
+        );
+        assert_eq!(result.outcome, outcome);
+        assert!(!result.scoped_completion);
+        assert!(result.completion_evidence.is_empty());
+    }
+}
+
+#[test]
+fn agent_reports_existing_blocked_scoped_intake_without_starting_daemon() {
+    let intake_path = PathBuf::from("/tmp/ws/.millracer/intake/probe-old.md");
+    let mut options = RunOptions::new(PathBuf::from("/tmp/ws"), PathBuf::from("/tmp/ws"));
+    options.route = "millrace".to_owned();
+    options.scoped_work_item = Some(ScopedWorkItem {
+        item_id: "ITEM-123".to_owned(),
+        title: None,
+        source_queue: None,
+        spec_path: None,
+        completion_ref: None,
+        constraints: Vec::new(),
+    });
+    let Value::Object(status_payload) = json!({
+        "workspace": "/tmp/ws",
+        "current_failure_class": "recon_handoff_invalid",
+        "latest_runtime_error_report_path": "/tmp/ws/runtime-errors/report.md",
+        "active_run_count": 0,
+        "execution_queue_depth": 0,
+        "planning_queue_depth": 0,
+        "learning_queue_depth": 0
+    }) else {
+        unreachable!();
+    };
+    let mut agent = MillracerAgent::new(
+        FakePi::default(),
+        FakeMillrace {
+            existing_scoped_intake: Some(intake_path.clone()),
+            status_payload,
+            ..FakeMillrace::default()
+        },
+        FakeMonitor::new(vec![MonitorEvent::new(
+            "arbiter_complete",
+            "/tmp/ws",
+            "should not be observed",
+        )]),
+    );
+
+    let result = agent
+        .run("Process the selected scoped item", options)
+        .expect("agent run");
+
+    assert_eq!(
+        result.event,
+        Some(MonitorEvent::new(
+            "blocked",
+            "/tmp/ws",
+            "recon_handoff_invalid"
+        ))
+    );
+    assert_eq!(result.task_path, Some(intake_path.display().to_string()));
+    assert_eq!(result.outcome, "blocked");
+    assert!(!result.scoped_completion);
+    assert!(result.completion_evidence.is_empty());
+    assert_eq!(
+        agent.millrace.calls,
+        ["initialize", "validate", "find_existing:ITEM-123", "status"]
+    );
+    let finalization_prompt = agent
+        .pi
+        .prompts
+        .iter()
+        .find(|prompt| prompt.contains("Millrace emitted this terminal event"))
+        .expect("finalization prompt");
+    assert!(finalization_prompt.contains("- outcome: blocked"));
+    assert!(finalization_prompt.contains("- scoped completion: false"));
 }
 
 #[test]
@@ -310,7 +507,7 @@ fn agent_respects_keep_daemon_after_terminal_event() {
         FakePi::default(),
         FakeMillrace::default(),
         FakeMonitor::new(vec![MonitorEvent::new(
-            "complete",
+            "idle_no_work",
             "/tmp/ws",
             "daemon idle",
         )]),
@@ -333,7 +530,7 @@ fn agent_surfaces_progress_events_and_notifies_pi() {
         FakeMillrace::default(),
         FakeMonitor::new(vec![
             MonitorEvent::new("stage_progress", "/tmp/ws", "updater update complete"),
-            MonitorEvent::new("complete", "/tmp/ws", "daemon idle"),
+            MonitorEvent::new("idle_no_work", "/tmp/ws", "daemon idle"),
         ]),
     );
 
@@ -368,7 +565,7 @@ fn agent_can_ignore_progress_prompts_when_notifications_are_disabled() {
         FakeMillrace::default(),
         FakeMonitor::new(vec![
             MonitorEvent::new("stage_progress", "/tmp/ws", "updater update complete"),
-            MonitorEvent::new("complete", "/tmp/ws", "daemon idle"),
+            MonitorEvent::new("idle_no_work", "/tmp/ws", "daemon idle"),
         ]),
     );
 

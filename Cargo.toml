@@ -1,6 +1,6 @@
 [package]
 name = "millracer"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Pi-backed Millrace-aware operator harness and Rust parity port."
 license = "Apache-2.0"

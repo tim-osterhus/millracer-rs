@@ -20,7 +20,7 @@ fn binary_help_and_version_work() {
         .expect("run version");
     assert!(version.status.success());
     let version_text = String::from_utf8(version.stdout).expect("utf8 version");
-    assert!(version_text.contains("millracer 0.1.1"));
+    assert!(version_text.contains("millracer 0.1.2"));
 }
 
 #[test]
@@ -157,6 +157,12 @@ fn benchmark_json_output_accepts_external_request_without_commands() {
     assert_eq!(payload["intake_kind"], "probe");
     assert_eq!(payload["pi_session"], "print");
     assert_eq!(payload["notify_terminal_stages"], true);
+    assert_eq!(payload["outcome"], "completed");
+    assert_eq!(payload["scoped_completion"], false);
+    assert_eq!(
+        payload["completion_evidence"].as_array().map(Vec::len),
+        Some(0)
+    );
     assert_eq!(payload["scoped_work_item"]["item_id"], "ITEM-123");
 }
 

@@ -1,8 +1,10 @@
 # Millracer
 
 Millracer is a Rust implementation of the Python `millracer` operator harness.
-The current Rust `0.1.1` bootstrap release targets parity with Python
-`millracer` `v0.1.4` at commit `c7807bb1816278fd7ddd7cdddbc7d548c1ff2b78`.
+The current Rust `0.1.2` patch parity release targets Python `millracer`
+`v0.1.5` at commit `6b6f03996c9f644228ca996dc6cf57be891956f2`. The previous
+Rust `0.1.1` bootstrap release remains the accepted Python `v0.1.4` parity
+baseline.
 
 Millracer keeps a Pi-backed outer operator session and can either answer a task
 directly or delegate substantial work into a Millrace workspace. The Rust crate
@@ -76,7 +78,16 @@ normalize away so metadata fallback can still match Python truthiness behavior.
 JSON output includes the selected route, intake kind, intake signals, decision
 metadata, warnings, Millrace event data, status payload, progress events,
 workspace, cwd, task path, Pi session mode, Millrace mode, terminal-stage
-notification setting, scoped-work metadata, and final output text.
+notification setting, scoped-work metadata, final outcome, scoped completion
+flag, completion evidence, and final output text.
+
+For Python `v0.1.5` parity, direct-route results report
+`outcome: "completed"` without scoped completion evidence. Delegated runs report
+`outcome: "completed"`, `scoped_completion: true`, and structured
+`completion_evidence` only when Arbiter completion or a closed closure-target
+event proves the selected scoped work completed. A drained daemon with no such
+evidence is reported as `idle_no_work` with `outcome: "incomplete"` and must
+not be treated as selected scoped-work completion.
 
 ## Scoped Work
 
@@ -143,7 +154,7 @@ with `--monitor none`.
 
 ## Parity Verification
 
-The Rust test suite maps to the Python `v0.1.4` reference tests as follows:
+The Rust test suite maps to the Python `v0.1.5` reference tests as follows:
 
 | Python reference | Rust coverage |
 | --- | --- |
@@ -164,7 +175,8 @@ fallbacks, scoped-work aliases, decision parsing, intake selection, prompt
 rendering, Pi print/RPC command construction, persistent RPC sessions,
 Millrace controller command construction, intake document rendering, daemon
 lifecycle handling, daemon monitor classification, direct/delegated/auto agent
-routing, and persistent operator reuse.
+routing, persistent operator reuse, final outcome reporting, scoped completion
+flags, completion evidence, and incomplete `idle_no_work` semantics.
 
 ## Package And Release Posture
 
@@ -176,7 +188,8 @@ Millrace state under `millrace-agents/` and local auto-port intake state are
 excluded from the crate package.
 
 Normal Millrace execution stages validate release readiness with
-`cargo publish --dry-run`, but they do not publish, tag, push, upload release
-artifacts, or otherwise perform deployment. Publishing belongs to the
-deterministic auto-port deployer after Arbiter accepts the completed bootstrap
-lineage.
+`cargo package --list` and `cargo publish --dry-run`, but they do not publish,
+tag, push, upload release artifacts, or otherwise perform deployment. Any local
+dry-run failure remains release-readiness evidence for Arbiter or deployer
+remediation. Publishing belongs to the deterministic auto-port deployer after
+Arbiter accepts the completed parity lineage.

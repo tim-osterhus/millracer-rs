@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -115,6 +116,41 @@ where
                 "unsupported Millrace intake kind: auto",
             )),
         }
+    }
+
+    pub fn find_existing_scoped_intake(
+        &self,
+        scoped_work_item: &ScopedWorkItem,
+    ) -> MillracerResult<Option<PathBuf>> {
+        let intake_dir = self.workspace.join(".millracer").join("intake");
+        let Ok(entries) = std::fs::read_dir(&intake_dir) else {
+            return Ok(None);
+        };
+        let mut intake_paths = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("md"))
+            .filter_map(|path| {
+                let modified = std::fs::metadata(&path)
+                    .ok()?
+                    .modified()
+                    .ok()?
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default();
+                Some((modified, path))
+            })
+            .collect::<Vec<_>>();
+        intake_paths.sort_by_key(|(modified, _)| Reverse(*modified));
+
+        for (_, intake_path) in intake_paths {
+            let Ok(text) = std::fs::read_to_string(&intake_path) else {
+                continue;
+            };
+            if matches_scoped_work(&text, scoped_work_item) {
+                return Ok(Some(intake_path));
+            }
+        }
+        Ok(None)
     }
 
     pub fn enqueue_probe(
@@ -484,6 +520,22 @@ fn slug(value: &str) -> String {
     } else {
         slug
     }
+}
+
+fn matches_scoped_work(text: &str, scoped_work_item: &ScopedWorkItem) -> bool {
+    let item_marker = format!("- Item-ID: {}", scoped_work_item.item_id);
+    if text.contains(&item_marker) {
+        return true;
+    }
+    let Some(completion_ref) = scoped_work_item
+        .completion_ref
+        .as_ref()
+        .filter(|completion_ref| !completion_ref.is_empty())
+    else {
+        return false;
+    };
+    let completion_marker = format!("- Completion-Ref: {completion_ref}");
+    text.contains(&completion_marker)
 }
 
 #[derive(Debug, Clone, Copy)]
