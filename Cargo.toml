@@ -1,0 +1,21 @@
+[package]
+name = "millracer"
+version = "0.1.0"
+edition = "2024"
+description = "Rust implementation seed for the Millracer operator harness."
+license = "Apache-2.0"
+repository = "https://github.com/tim-osterhus/millracer-rs"
+homepage = "https://millrace.ai"
+readme = "README.md"
+keywords = ["ai", "agents", "millrace", "operator"]
+categories = ["command-line-utilities", "development-tools"]
+rust-version = "1.85"
+include = [
+    "/Cargo.lock",
+    "/Cargo.toml",
+    "/LICENSE",
+    "/README.md",
+    "/src/**/*.rs",
+]
+
+[dependencies]
