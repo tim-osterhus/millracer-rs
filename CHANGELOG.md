@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.2.0 - Python v0.2.0 ops parity release readiness
+
+- Bumped the Rust crate to the planned minor version `0.2.0` for parity with
+  Python `millracer` `v0.2.0` at commit
+  `7f52962b853c8720da304d33a3d3d28fd142b826`.
+- Added the typed ops JSON boundary with schema `millracer.ops.v0.2`,
+  `millracer ops --json`, structured request/result/event models, structured
+  warnings and errors, and the reserved `--stream-json`
+  `unsupported_transport` response.
+- Added deterministic ops service dispatch for `status`, `enqueue`,
+  `list_workspaces`, `select_workspace`, `list_sessions`, and
+  `inspect_session`, including machine-readable `unsupported_action`,
+  `workspace_unresolved`, and runtime failure results instead of arbitrary
+  shell fallthrough.
+- Added workspace resolution and lightweight session helpers while keeping
+  session state limited to convenience data such as selected workspace/mode,
+  recent request ids, and warning codes. Queue truth, work-item lifecycle
+  truth, traces, artifacts, approvals, and terminal outcomes remain runtime
+  authority, not session persistence.
+- Preserved scoped-completion gating: external callers should treat delegated
+  scoped work as complete only when ops completion or legacy JSON evidence
+  reports positive scoped completion.
+- Preserved legacy `run --benchmark-json --output json` compatibility by
+  converting legacy requests into ops enqueue requests and rendering ops
+  results back into the older one-shot JSON shape.
+- Kept the package include allowlist limited to public crate files, Rust tests,
+  and ops JSON fixtures while excluding `millrace-agents/`, `target/`, runtime
+  state, and local operational artifacts from the public crate package.
+
+Parity coverage for the Python `v0.2.0` reference tests:
+
+| Python reference | Rust coverage |
+| --- | --- |
+| `tests/test_agent.py` | `tests/agent.rs` |
+| `tests/test_benchmark.py` | `tests/benchmark.rs` |
+| `tests/test_cli.py` | `tests/cli.rs` |
+| `tests/test_decision.py` | `tests/decision.rs` |
+| `tests/test_intake.py` | `tests/intake.rs` |
+| `tests/test_millrace.py` | `tests/millrace.rs`, `tests/scope.rs` |
+| `tests/test_monitor.py` | `tests/monitor.rs` |
+| `tests/test_ops_models.py` | `tests/ops_models.rs` |
+| `tests/test_ops_service.py` | `tests/ops_service.rs` |
+| `tests/test_operator.py` | `tests/operator.rs` |
+| `tests/test_pi.py` | `tests/pi.rs` |
+| `tests/test_prompts.py` | `tests/prompts.rs` |
+| `tests/test_sessions.py` | `tests/sessions.rs` |
+| `tests/test_workspaces.py` | `tests/workspaces.rs` |
+
+Release verification targets for Arbiter:
+
+- `cargo fmt --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test --all`
+- `cargo metadata --no-deps --format-version 1`
+- `cargo package --list`
+- `cargo publish --dry-run`
+- `git diff --check`
+
+Normal Builder and Checker stages must record any dry-run failure as release
+readiness evidence instead of publishing, tagging, pushing, uploading, or
+deploying release artifacts.
+
 ## 0.1.2 - Python v0.1.5 patch parity release readiness
 
 - Bumped the Rust crate to the planned patch version `0.1.2` for parity with

@@ -1,0 +1,26 @@
+{
+  "schema_version": "millracer.ops.v0.2",
+  "request_id": "req-enqueue-001",
+  "client_name": "mission-control",
+  "workspace_ref": {
+    "root_path": "/tmp/ws",
+    "mode": "learning_codex"
+  },
+  "source": {
+    "kind": "mission_control",
+    "surface": "command_panel"
+  },
+  "action": "enqueue",
+  "route_preference": "millrace",
+  "intake_preference": "task",
+  "input": {
+    "kind": "natural_language",
+    "text": "Implement the selected packet only."
+  },
+  "scoped_work_item": {
+    "item_id": "WP-002A",
+    "title": "Millracer ops contract skeleton",
+    "constraints": ["Do not implement unrelated packets."]
+  },
+  "expected_evidence": ["changed file list", "tests run", "terminal outcome"]
+}

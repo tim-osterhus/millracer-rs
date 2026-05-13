@@ -3,6 +3,7 @@ use millracer::cli::{Cli, Commands, Intake, OutputMode, PiSession, Route, run_fr
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn binary_help_and_version_work() {
@@ -13,6 +14,7 @@ fn binary_help_and_version_work() {
     let help_text = String::from_utf8(help.stdout).expect("utf8 help");
     assert!(help_text.contains("run"));
     assert!(help_text.contains("operator"));
+    assert!(help_text.contains("ops"));
 
     let version = Command::new(bin)
         .arg("--version")
@@ -20,7 +22,7 @@ fn binary_help_and_version_work() {
         .expect("run version");
     assert!(version.status.success());
     let version_text = String::from_utf8(version.stdout).expect("utf8 version");
-    assert!(version_text.contains("millracer 0.1.2"));
+    assert!(version_text.contains("millracer 0.2.0"));
 }
 
 #[test]
@@ -87,6 +89,99 @@ fn operator_parser_accepts_common_options() {
     };
     assert_eq!(args.common.intake, Intake::Idea);
     assert!(args.common.notify_terminal_stages());
+}
+
+#[test]
+fn ops_parser_accepts_json_modes_and_common_options() {
+    let cli = Cli::try_parse_from([
+        "millracer",
+        "ops",
+        "--json",
+        "--workspace",
+        "/tmp/ws",
+        "--route",
+        "millrace",
+        "--intake",
+        "task",
+    ])
+    .expect("parse ops args");
+
+    let Some(Commands::Ops(args)) = cli.command else {
+        panic!("expected ops command");
+    };
+    assert!(args.json);
+    assert!(!args.stream_json);
+    assert_eq!(args.common.workspace.to_string_lossy(), "/tmp/ws");
+    assert_eq!(args.common.route, Route::Millrace);
+    assert_eq!(args.common.intake, Intake::Task);
+
+    let stream =
+        Cli::try_parse_from(["millracer", "ops", "--stream-json"]).expect("parse stream ops args");
+    let Some(Commands::Ops(args)) = stream.command else {
+        panic!("expected ops command");
+    };
+    assert!(args.stream_json);
+}
+
+#[test]
+fn ops_requires_json_or_stream_json_flag() {
+    let outcome = run_from(["millracer", "ops"], "");
+
+    assert_eq!(outcome.exit_code, 2);
+    assert!(outcome.stdout.is_empty());
+    assert!(
+        outcome
+            .stderr
+            .contains("ops requires --json or --stream-json")
+    );
+}
+
+#[test]
+fn ops_stream_json_returns_unsupported_transport_result() {
+    let workspace = temp_workspace("ops-stream");
+    let request = ops_status_request(&workspace);
+
+    let outcome = run_from(["millracer", "ops", "--stream-json"], &request);
+
+    assert_eq!(outcome.exit_code, 1);
+    assert!(outcome.stderr.is_empty());
+    let payload: Value = serde_json::from_str(&outcome.stdout).expect("json stdout");
+    assert_eq!(payload["status"], "failed");
+    assert_eq!(payload["errors"][0]["code"], "unsupported_transport");
+    assert_eq!(payload["errors"][0]["recoverable"], true);
+}
+
+#[test]
+fn ops_json_status_reads_request_and_outputs_result() {
+    let workspace = temp_workspace("ops-json");
+    let millrace = fake_millrace_command("ops-json");
+    let request = ops_status_request(&workspace);
+
+    let outcome = run_from(
+        vec![
+            "millracer".to_owned(),
+            "ops".to_owned(),
+            "--json".to_owned(),
+            "--workspace".to_owned(),
+            workspace.display().to_string(),
+            "--millrace-command".to_owned(),
+            millrace.display().to_string(),
+        ],
+        &request,
+    );
+
+    assert_eq!(outcome.exit_code, 0, "stderr: {}", outcome.stderr);
+    assert!(outcome.stderr.is_empty());
+    let payload: Value = serde_json::from_str(&outcome.stdout).expect("json stdout");
+    assert_eq!(payload["schema_version"], "millracer.ops.v0.2");
+    assert_eq!(payload["request_id"], "req-cli-status");
+    assert_eq!(payload["status"], "succeeded");
+    assert_eq!(payload["route"], "status_only");
+    assert_eq!(payload["result"]["process_running"], false);
+    assert_eq!(
+        payload["result"]["workspace"],
+        workspace.display().to_string()
+    );
 }
 
 #[test]
@@ -196,4 +291,69 @@ esac
         std::fs::set_permissions(&path, permissions).expect("chmod fake pi");
     }
     path
+}
+
+fn temp_workspace(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "millracer-cli-{name}-{}-{}",
+        std::process::id(),
+        unique_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("workspace dir");
+    dir
+}
+
+fn fake_millrace_command(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "millracer-cli-fake-millrace-{name}-{}-{}",
+        std::process::id(),
+        unique_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("fake millrace dir");
+    let path = dir.join("millrace");
+    std::fs::write(
+        &path,
+        r#"#!/bin/sh
+if [ "$1" = "status" ]; then
+  printf '{"workspace":"%s","process_running":false}\n' "$3"
+  exit 0
+fi
+printf 'unexpected command: %s\n' "$*" >&2
+exit 1
+"#,
+    )
+    .expect("write fake millrace");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).expect("chmod fake millrace");
+    }
+    path
+}
+
+fn ops_status_request(workspace: &std::path::Path) -> String {
+    format!(
+        r#"{{
+  "schema_version": "millracer.ops.v0.2",
+  "request_id": "req-cli-status",
+  "workspace_ref": {{
+    "root_path": "{}"
+  }},
+  "source": {{
+    "kind": "cli"
+  }},
+  "action": "status",
+  "input": {{}}
+}}"#,
+        workspace.display()
+    )
+}
+
+fn unique_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos()
 }

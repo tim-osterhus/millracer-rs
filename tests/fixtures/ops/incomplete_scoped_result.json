@@ -1,0 +1,36 @@
+{
+  "schema_version": "millracer.ops.v0.2",
+  "request_id": "req-enqueue-001",
+  "status": "incomplete",
+  "action": "enqueue",
+  "workspace_ref": {
+    "root_path": "/tmp/ws",
+    "runtime_kind": "local",
+    "mode": "learning_codex"
+  },
+  "started_at": "2026-05-12T00:00:00+00:00",
+  "finished_at": "2026-05-12T00:00:01+00:00",
+  "warnings": [],
+  "errors": [],
+  "result": {
+    "output": "delegated"
+  },
+  "route": "millrace",
+  "intake_kind": "task",
+  "scoped_work_item": {
+    "item_id": "WP-002A",
+    "title": "Millracer ops contract skeleton",
+    "source_queue": null,
+    "spec_path": null,
+    "completion_ref": null,
+    "constraints": ["Do not implement unrelated packets."]
+  },
+  "completion": {
+    "outcome": "incomplete",
+    "scoped_completion": false,
+    "evidence_summary": [],
+    "missing_evidence": ["positive scoped completion evidence"],
+    "verification_status": "unverified",
+    "terminal_outcome_ref": null
+  }
+}

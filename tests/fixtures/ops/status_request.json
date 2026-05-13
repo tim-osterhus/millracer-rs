@@ -1,0 +1,26 @@
+{
+  "schema_version": "millracer.ops.v0.2",
+  "request_id": "req-status-001",
+  "client_name": "mission-control",
+  "workspace_ref": {
+    "workspace_id": "millrace-os",
+    "root_path": "/tmp/millrace-os",
+    "display_name": "Millrace OS",
+    "runtime_kind": "local",
+    "mode": "learning_codex"
+  },
+  "source": {
+    "kind": "mission_control",
+    "surface": "command_panel"
+  },
+  "actor": {
+    "kind": "local_user",
+    "display_name": "operator"
+  },
+  "action": "status",
+  "route_preference": "status_only",
+  "input": {
+    "kind": "structured_action",
+    "payload": {}
+  }
+}

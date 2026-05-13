@@ -7,10 +7,14 @@ pub mod intake;
 pub mod millrace;
 pub mod monitor;
 pub mod operator;
+pub mod ops_models;
+pub mod ops_service;
 pub mod pi;
 pub mod pi_rpc;
 pub mod prompts;
 pub mod scope;
+pub mod sessions;
+pub mod workspaces;
 
 use std::error::Error;
 use std::fmt::{Display, Formatter};

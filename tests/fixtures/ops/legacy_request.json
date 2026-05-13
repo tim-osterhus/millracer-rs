@@ -1,0 +1,11 @@
+{
+  "task": "Implement the selected queue item only.",
+  "workspace": "/tmp/ws",
+  "intake_kind": "probe",
+  "scoped_work_item": {
+    "item_id": "ITEM-123",
+    "title": "Fix selected failure",
+    "completion_ref": "complete-ITEM-123",
+    "constraints": ["Do not implement any other queue item."]
+  }
+}

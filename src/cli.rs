@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -14,9 +15,16 @@ use crate::intake::IntakeKind;
 use crate::millrace::{MillraceConfig, MillraceController};
 use crate::monitor::DaemonMonitor;
 use crate::operator::MillracerOperator;
+use crate::ops_models::{
+    Completion, ErrorRecord, JsonObject, OpsRequest, OpsResult, SCHEMA_VERSION, parse_ops_request,
+    render_ops_result,
+};
+use crate::ops_service::{OpsService, now as ops_timestamp};
 use crate::pi::{PiConfig, PiHarness, discover_default_skill_paths, normalize_path};
 use crate::pi_rpc::PiRpcHarness;
 use crate::scope::ScopedWorkItem;
+use crate::sessions::SessionStore;
+use crate::workspaces::{WorkspaceRecord, WorkspaceRegistry};
 use crate::{MillracerError, MillracerResult};
 
 type StatusLoader = Box<dyn FnMut() -> MillracerResult<Map<String, Value>>>;
@@ -41,6 +49,8 @@ pub enum Commands {
     Run(RunArgs),
     /// Start a persistent Millracer operator.
     Operator(OperatorArgs),
+    /// Run one typed Millracer ops request.
+    Ops(OpsArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -60,6 +70,18 @@ pub struct RunArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct OperatorArgs {
+    #[command(flatten)]
+    pub common: CommonOptions,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct OpsArgs {
+    /// Read one OpsRequest JSON object from stdin.
+    #[arg(long = "json", action = ArgAction::SetTrue)]
+    pub json: bool,
+    /// Reserved streaming JSON transport.
+    #[arg(long = "stream-json", action = ArgAction::SetTrue)]
+    pub stream_json: bool,
     #[command(flatten)]
     pub common: CommonOptions,
 }
@@ -234,6 +256,13 @@ pub fn main() -> i32 {
             }
             write_outcome(dispatch(parsed, &stdin))
         }
+        Some(Commands::Ops(ops_args)) if ops_args.needs_stdin() => {
+            let mut stdin = String::new();
+            if let Err(error) = io::stdin().read_to_string(&mut stdin) {
+                return write_outcome(CliOutcome::error(error.to_string()));
+            }
+            write_outcome(dispatch(parsed, &stdin))
+        }
         Some(Commands::Operator(_)) => {
             let mut stdin = String::new();
             if let Err(error) = io::stdin().read_to_string(&mut stdin) {
@@ -283,6 +312,7 @@ fn dispatch(cli: Cli, stdin: &str) -> CliOutcome {
     match cli.command {
         Some(Commands::Run(args)) => handle_run(args, stdin),
         Some(Commands::Operator(args)) => handle_operator(args, stdin),
+        Some(Commands::Ops(args)) => handle_ops(args, stdin),
         None => {
             let mut help = Vec::new();
             let mut command = Cli::command();
@@ -293,6 +323,35 @@ fn dispatch(cli: Cli, stdin: &str) -> CliOutcome {
                 stderr: String::new(),
             }
         }
+    }
+}
+
+fn handle_ops(args: OpsArgs, stdin: &str) -> CliOutcome {
+    if !args.json && !args.stream_json {
+        return CliOutcome {
+            exit_code: 2,
+            stdout: String::new(),
+            stderr: "millracer: error: ops requires --json or --stream-json\n".to_owned(),
+        };
+    }
+
+    let request = match parse_ops_request(stdin) {
+        Ok(request) => request,
+        Err(error) => return CliOutcome::error(error.to_string()),
+    };
+    let result = if args.stream_json {
+        unsupported_stream_result(&request)
+    } else {
+        let mut service = build_production_ops_service(&args);
+        service.handle(&request)
+    };
+    match serde_json::to_string_pretty(&render_ops_result(&result)) {
+        Ok(json) => CliOutcome {
+            exit_code: if result.status == "failed" { 1 } else { 0 },
+            stdout: format!("{json}\n"),
+            stderr: String::new(),
+        },
+        Err(error) => CliOutcome::error(error.to_string()),
     }
 }
 
@@ -572,6 +631,114 @@ fn build_production_agent(
     MillracerAgent::new(pi, millrace, monitor)
 }
 
+fn build_production_ops_service(args: &OpsArgs) -> OpsService {
+    let runtime_common = args.common.clone();
+    let agent_common = args.common.clone();
+    let cli_workspace = normalize_path(&args.common.workspace);
+    let mut default_record = WorkspaceRecord::new("default", cli_workspace.clone());
+    default_record.display_name = cli_workspace
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(ToOwned::to_owned)
+        .or_else(|| Some(cli_workspace.display().to_string()));
+    default_record.default_mode = Some(args.common.millrace_mode.clone());
+    let registry = WorkspaceRegistry {
+        records: BTreeMap::from([("default".to_owned(), default_record)]),
+        default_workspace_id: Some("default".to_owned()),
+    };
+    let session_store = SessionStore::new(session_store_path());
+
+    let mut service = OpsService::new(move |resolution| {
+        let workspace = resolution
+            .root_path
+            .as_ref()
+            .map(|path| normalize_path(path))
+            .unwrap_or_else(|| normalize_path(&runtime_common.workspace));
+        let cwd = runtime_common
+            .cwd
+            .as_ref()
+            .map(|path| normalize_path(path))
+            .unwrap_or_else(|| workspace.clone());
+        let config = MillraceConfig {
+            command: runtime_common.millrace_command.clone(),
+            mode: resolution
+                .mode
+                .clone()
+                .unwrap_or_else(|| runtime_common.millrace_mode.clone()),
+        };
+        MillraceController::new(config, workspace, Some(cwd))
+    })
+    .with_agent_factory(move |resolution, _runtime| {
+        let workspace = resolution
+            .root_path
+            .as_ref()
+            .map(|path| normalize_path(path))
+            .unwrap_or_else(|| normalize_path(&agent_common.workspace));
+        let cwd = agent_common
+            .cwd
+            .as_ref()
+            .map(|path| normalize_path(path))
+            .unwrap_or_else(|| workspace.clone());
+        let mut common = agent_common.clone();
+        if let Some(mode) = resolution.mode.clone() {
+            common.millrace_mode = mode;
+        }
+        build_production_agent(&common, PiSession::Rpc, &workspace, &cwd)
+    });
+    service.registry = registry;
+    service.session_store = Some(session_store);
+    service.cli_workspace = Some(cli_workspace);
+    service.cwd = args.common.cwd.as_ref().map(|path| normalize_path(path));
+    service
+}
+
+fn unsupported_stream_result(request: &OpsRequest) -> OpsResult {
+    let now = ops_timestamp();
+    OpsResult {
+        schema_version: SCHEMA_VERSION.to_owned(),
+        request_id: request.request_id.clone(),
+        status: "failed".to_owned(),
+        action: request.action.clone(),
+        workspace_ref: request.workspace_ref.clone(),
+        started_at: now.clone(),
+        finished_at: now,
+        warnings: Vec::new(),
+        errors: vec![ErrorRecord {
+            code: "unsupported_transport".to_owned(),
+            message: "Streaming ops JSON is not implemented in this Millracer version.".to_owned(),
+            severity: "error".to_owned(),
+            recoverable: true,
+            related_ref: None,
+            suggested_action: Some("Use millracer ops --json.".to_owned()),
+        }],
+        result: JsonObject::new(),
+        route: None,
+        intake_kind: None,
+        scoped_work_item: None,
+        completion: Some(Completion {
+            outcome: "unknown".to_owned(),
+            scoped_completion: false,
+            evidence_summary: Vec::new(),
+            missing_evidence: Vec::new(),
+            verification_status: "unverified".to_owned(),
+            terminal_outcome_ref: None,
+        }),
+        evidence_refs: Vec::new(),
+        event_cursor: None,
+        session_ref: None,
+        raw_compat: None,
+    }
+}
+
+fn session_store_path() -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .join(".millracer")
+        .join("sessions.json")
+}
+
 fn warning_stderr(warnings: &[String]) -> String {
     warnings
         .iter()
@@ -592,5 +759,11 @@ fn write_outcome(outcome: CliOutcome) -> i32 {
 impl RunArgs {
     fn needs_stdin(&self) -> bool {
         self.benchmark_json || self.task.is_empty()
+    }
+}
+
+impl OpsArgs {
+    fn needs_stdin(&self) -> bool {
+        self.json || self.stream_json
     }
 }

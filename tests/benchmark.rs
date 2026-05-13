@@ -2,9 +2,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use millracer::benchmark::{
-    MonitorEvent, RunResult, parse_benchmark_request, render_benchmark_result,
+    MonitorEvent, RunResult, ops_result_to_legacy_json, parse_benchmark_request,
+    parse_legacy_request_as_ops, render_benchmark_result,
 };
 use millracer::decision::Decision;
+use millracer::ops_models::{Completion, OpsResult, SCHEMA_VERSION, WorkspaceRef};
 use millracer::scope::ScopedWorkItem;
 use serde_json::Value;
 
@@ -174,4 +176,93 @@ fn render_benchmark_result_includes_scoped_work_item() {
     );
     assert_eq!(payload["completion_evidence"][0]["reason"], "closed");
     assert_eq!(payload["completion_evidence"][0]["workspace"], "/tmp/ws");
+}
+
+#[test]
+fn legacy_request_maps_to_ops_request() {
+    let request = parse_legacy_request_as_ops(
+        include_str!("fixtures/ops/legacy_request.json"),
+        Some("req-legacy-001"),
+    )
+    .expect("legacy request");
+
+    assert_eq!(request.schema_version, SCHEMA_VERSION);
+    assert_eq!(request.request_id, "req-legacy-001");
+    assert_eq!(request.source.kind, "benchmark_compat");
+    assert_eq!(request.action, "enqueue");
+    assert_eq!(request.route_preference, "millrace");
+    assert_eq!(request.intake_preference, "probe");
+    assert_eq!(request.input["kind"], "legacy_benchmark");
+    assert_eq!(
+        request.input["text"],
+        "Implement the selected queue item only."
+    );
+    assert_eq!(
+        request
+            .scoped_work_item
+            .as_ref()
+            .map(|item| item.item_id.as_str()),
+        Some("ITEM-123")
+    );
+    assert_eq!(
+        request.metadata["legacy_request"]["scoped_work_item"]["completion_ref"],
+        "complete-ITEM-123"
+    );
+}
+
+#[test]
+fn ops_result_can_render_legacy_json() {
+    let raw = ops_result_to_legacy_json(&OpsResult {
+        schema_version: SCHEMA_VERSION.to_owned(),
+        request_id: "req-legacy-001".to_owned(),
+        status: "incomplete".to_owned(),
+        action: "enqueue".to_owned(),
+        workspace_ref: WorkspaceRef {
+            workspace_id: None,
+            root_path: Some("/tmp/ws".to_owned()),
+            display_name: None,
+            runtime_kind: "local".to_owned(),
+            mode: None,
+            environment: None,
+        },
+        started_at: "2026-05-12T00:00:00+00:00".to_owned(),
+        finished_at: "2026-05-12T00:00:01+00:00".to_owned(),
+        warnings: Vec::new(),
+        errors: Vec::new(),
+        result: serde_json::Map::from_iter([(
+            "output".to_owned(),
+            Value::String("not complete".to_owned()),
+        )]),
+        route: Some("millrace".to_owned()),
+        intake_kind: Some("probe".to_owned()),
+        scoped_work_item: Some(ScopedWorkItem {
+            item_id: "ITEM-123".to_owned(),
+            title: None,
+            source_queue: None,
+            spec_path: None,
+            completion_ref: None,
+            constraints: Vec::new(),
+        }),
+        completion: Some(Completion {
+            outcome: "incomplete".to_owned(),
+            scoped_completion: false,
+            evidence_summary: Vec::new(),
+            missing_evidence: Vec::new(),
+            verification_status: "unverified".to_owned(),
+            terminal_outcome_ref: None,
+        }),
+        evidence_refs: Vec::new(),
+        event_cursor: None,
+        session_ref: None,
+        raw_compat: Some(serde_json::Map::from_iter([(
+            "route".to_owned(),
+            Value::String("millrace".to_owned()),
+        )])),
+    })
+    .expect("legacy render");
+
+    let payload: Value = serde_json::from_str(&raw).expect("json");
+    assert_eq!(payload["status"], "incomplete");
+    assert_eq!(payload["completion"]["scoped_completion"], false);
+    assert_eq!(payload["raw_compat"]["route"], "millrace");
 }

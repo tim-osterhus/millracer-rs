@@ -1,11 +1,16 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 
 use crate::decision::Decision;
 use crate::intake::normalize_intake_kind;
 pub use crate::monitor::MonitorEvent;
+use crate::ops_models::{
+    ActorRef, JsonObject, OpsRequest, OpsResult, SCHEMA_VERSION, SourceRef, WorkspaceRef,
+    render_ops_result,
+};
 use crate::scope::ScopedWorkItem;
 use crate::{MillracerError, MillracerResult};
 
@@ -84,6 +89,73 @@ pub fn parse_benchmark_request(raw: &str) -> MillracerResult<BenchmarkRequest> {
 
 pub fn render_benchmark_result(result: &RunResult) -> MillracerResult<String> {
     Ok(serde_json::to_string_pretty(&run_result_json(result))?)
+}
+
+pub fn parse_legacy_request_as_ops(
+    raw: &str,
+    request_id: Option<&str>,
+) -> MillracerResult<OpsRequest> {
+    let payload: Value = serde_json::from_str(raw)?;
+    let request = parse_benchmark_request(raw)?;
+    let mut metadata: JsonObject = request.metadata.clone().into_iter().collect();
+    metadata.insert(
+        "legacy_request".to_owned(),
+        payload
+            .as_object()
+            .cloned()
+            .map(Value::Object)
+            .unwrap_or_else(|| Value::Object(JsonObject::new())),
+    );
+
+    Ok(OpsRequest {
+        schema_version: SCHEMA_VERSION.to_owned(),
+        request_id: request_id
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(default_legacy_request_id),
+        action: "enqueue".to_owned(),
+        workspace_ref: WorkspaceRef {
+            workspace_id: None,
+            root_path: request
+                .workspace
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            display_name: None,
+            runtime_kind: "local".to_owned(),
+            mode: None,
+            environment: None,
+        },
+        source: SourceRef {
+            kind: "benchmark_compat".to_owned(),
+            surface: None,
+            adapter_id: None,
+            conversation_id: None,
+            message_id: None,
+            parent_request_id: None,
+            trace_ref: None,
+        },
+        input: JsonObject::from_iter([
+            (
+                "kind".to_owned(),
+                Value::String("legacy_benchmark".to_owned()),
+            ),
+            ("text".to_owned(), Value::String(request.task)),
+        ]),
+        client_name: None,
+        client_version: None,
+        actor: None::<ActorRef>,
+        route_preference: "millrace".to_owned(),
+        intake_preference: request.intake_kind.unwrap_or_else(|| "auto".to_owned()),
+        scoped_work_item: request.scoped_work_item,
+        expected_evidence: Vec::new(),
+        context_refs: Vec::new(),
+        options: JsonObject::new(),
+        metadata,
+        idempotency_key: None,
+    })
+}
+
+pub fn ops_result_to_legacy_json(result: &OpsResult) -> MillracerResult<String> {
+    Ok(serde_json::to_string_pretty(&render_ops_result(result))?)
 }
 
 fn run_result_json(result: &RunResult) -> Value {
@@ -255,4 +327,12 @@ fn optional_string(value: Option<&Value>) -> Option<String> {
 
 fn parse_intake_kind(value: &str) -> Option<String> {
     normalize_intake_kind(value, false).map(|kind| kind.as_str().to_owned())
+}
+
+fn default_legacy_request_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("req-legacy-{nanos}")
 }
